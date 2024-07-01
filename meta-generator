@@ -1,0 +1,130 @@
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('Meta Generator')
+    .addItem('Generate Meta Descriptions', 'main')
+    .addToUi();
+}
+
+function readSheetData(sheetName) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+  if (!sheet) {
+    throw new Error(`Sheet with name "${sheetName}" not found`);
+  }
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+  const rows = data.slice(1);
+  return { headers, rows };
+}
+
+function writeSheetData(sheet, data, rowIndex) {
+  const range = sheet.getRange(rowIndex + 2, 1, 1, data.length); // +2 to account for 0-based index and header row
+  range.setValues([data]);
+}
+
+function readControllerData() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('controllers');
+  if (!sheet) {
+    throw new Error(`Sheet with name "controllers" not found`);
+  }
+  const apiKey = sheet.getRange('B2').getValue();
+  const maxTokens = sheet.getRange('B3').getValue();
+  const gptModel = sheet.getRange('B4').getValue();
+  const prePrompt = sheet.getRange('B5').getValue();
+  return { apiKey, maxTokens, gptModel, prePrompt };
+}
+
+function concatenatePrompts(urls, metaDescriptions) {
+  let concatenatedPrompts = "";
+  for (let i = 0; i < urls.length; i++) {
+    concatenatedPrompts += `\n\nExample ${i + 1}:\n\n\tURL: ${urls[i]}\n\n\tExample Meta Description: ${metaDescriptions[i]}\n\n`;
+  }
+  return concatenatedPrompts;
+}
+
+function appendPrePrompt(prePrompt, concatenatedPrompts, targetUrl) {
+  return prePrompt + concatenatedPrompts + `\n\nPlease generate a meta description for the following URL:\n\n\tURL: ${targetUrl}\n\n`;
+}
+
+function getCompletion(fullPrompt, apiKey, model, maxTokens) {
+  const url = "https://api.openai.com/v1/chat/completions";
+  const payload = {
+    model: model,
+    messages: [{ role: "user", content: fullPrompt }],
+    max_tokens: maxTokens,
+    temperature: 0
+  };
+  
+  const options = {
+    method: 'post',
+    contentType: 'application/json',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`
+    },
+    payload: JSON.stringify(payload)
+  };
+  
+  const response = UrlFetchApp.fetch(url, options);
+  const json = JSON.parse(response.getContentText());
+  return json.choices[0].message.content.trim();
+}
+
+function main() {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+
+  try {
+    // Read controller data
+    const { apiKey, maxTokens, gptModel, prePrompt } = readControllerData();
+
+    // Read data from the 'prompts' sheet
+    Logger.log("Reading data from the 'prompts' sheet");
+    const promptsData = readSheetData('prompts');
+    Logger.log("Data read from 'prompts' sheet successfully");
+    const exampleUrls = promptsData.rows.map(row => row[0]);
+    const exampleMetaDescriptions = promptsData.rows.map(row => row[1]);
+
+    // Read data from the 'meta-generator' sheet
+    Logger.log("Reading data from the 'meta-generator' sheet");
+    const metaGeneratorSheet = spreadsheet.getSheetByName('meta-generator');
+    const metaGeneratorData = readSheetData('meta-generator');
+    Logger.log("Data read from 'meta-generator' sheet successfully");
+    const targetUrls = metaGeneratorData.rows.map(row => row[0]);
+
+    const concatenatedPrompts = concatenatePrompts(exampleUrls.slice(0, 3), exampleMetaDescriptions.slice(0, 3));
+
+    // Process each target URL
+    for (let i = 0; i < targetUrls.length; i++) {
+      const targetUrl = targetUrls[i];
+      
+      try {
+        // Display processing message
+        let shortUrl = targetUrl.length > 50 ? targetUrl.substring(0, 47) + '...' : targetUrl;
+        spreadsheet.toast(`Processing URL ${i + 1}: ${shortUrl}`, 'Processing', 10);
+        
+        // Append the pre-prompt and concatenated prompts with the target URL
+        const fullPrompt = appendPrePrompt(prePrompt, concatenatedPrompts, targetUrl);
+        
+        // Print processing message
+        Logger.log(`Processing URL ${i + 1}: ${targetUrl}`);
+        
+        // Make the API call
+        const response = getCompletion(fullPrompt, apiKey, gptModel, maxTokens);
+        
+        // Remove the 'Meta Description: ' prefix if present
+        const cleanResponse = response.replace('Meta Description: ', '').trim();
+        
+        // Write the result to the sheet immediately
+        Logger.log("Writing data back to the 'meta-generator' sheet");
+        writeSheetData(metaGeneratorSheet, [targetUrl, cleanResponse], i);
+        Logger.log("Data written to 'meta-generator' sheet successfully");
+        
+      } catch (error) {
+        Logger.log(`Error processing URL ${targetUrl}: ${error.message}`);
+        spreadsheet.toast(`Error processing URL ${targetUrl}: ${error.message}`, 'Error', 10);
+      }
+    }
+
+  } catch (error) {
+    Logger.log(`Error: ${error.message}`);
+    spreadsheet.toast(`Error: ${error.message}`, 'Error', 10);
+  }
+}
